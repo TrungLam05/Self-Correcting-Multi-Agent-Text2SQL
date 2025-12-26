@@ -1,0 +1,16 @@
+# macOS
+.DS_Store
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Archives/artifacts
+*.zip
+
+# IDE
+.vscode/
+
+# Optional 
+target/
