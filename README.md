@@ -1,6 +1,6 @@
 # Self-Correcting Multi-Agent Text2SQL (gRPC-first, hybrid serverless)
 
-A DoorDash-style internal analytics copilot:
+A internal analytics copilot:
 
 - One **gRPC** endpoint: `Text2SQLService/ExecuteQuery`
 - Converts natural language → safe, verified **SELECT-only SQL**
