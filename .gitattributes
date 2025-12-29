@@ -1,0 +1,10 @@
+# Default: keep LF in repo
+* text=auto eol=lf
+
+# Windows scripts should be CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Shell scripts should be LF
+*.sh text eol=lf
+mvnw text eol=lf

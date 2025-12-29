@@ -4,3 +4,14 @@ tests/
 __pycache__/
 .env
 *.pyc
+# macOS
+.DS_Store
+
+# Archives/artifacts
+*.zip
+
+# IDE
+.vscode/
+
+# Optional 
+target/
