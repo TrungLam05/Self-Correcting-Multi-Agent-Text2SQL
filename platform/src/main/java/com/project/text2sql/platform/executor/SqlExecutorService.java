@@ -31,14 +31,18 @@ public class SqlExecutorService {
         String sanitizedSql;
         try {
             sanitizedSql = safetyPolicy.sanitizeAndEnforceLimit(rawSql);
-        } catch (IllegalArgumentException e) {
+        } catch (SqlSanitizationException e) {
             long ms = (System.nanoTime() - start) / 1_000_000L;
-            return ExecuteSqlResponse.error(
-                    rawSql,
-                    ms,
-                    SqlExecutionError.fromSafetyViolation(e.getMessage())
+            String detailedMessage = String.format("[%s] %s", 
+            e.getViolationType(), 
+            e.getMessage()
             );
-        }
+            return ExecuteSqlResponse.error(
+                rawSql,
+                ms,
+                SqlExecutionError.fromSafetyViolation(detailedMessage)
+            );
+}
 
         // Step 2: Execute SQL (catch database errors)
         try {

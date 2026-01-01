@@ -32,7 +32,8 @@ class SqlExecutorControllerTest {
                         List.of(List.of("1")),
                         false,
                         1,
-                        5
+                        5,
+                        null
                 ));
 
         mvc.perform(post("/api/executor/execute")
