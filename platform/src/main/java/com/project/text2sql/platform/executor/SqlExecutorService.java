@@ -3,6 +3,8 @@ package com.project.text2sql.platform.executor;
 import com.project.text2sql.platform.config.Text2SqlExecutorProperties;
 import com.project.text2sql.platform.executor.dto.ExecuteSqlResponse;
 import com.project.text2sql.platform.executor.dto.SqlExecutionError;
+import com.project.text2sql.platform.executor.dto.SqlRepairMetadata;
+
 import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -26,11 +28,12 @@ public class SqlExecutorService {
 
     public ExecuteSqlResponse execute(String rawSql) {
         long start = System.nanoTime();
+        int retryCount = 0;
         
         // Step 1: Sanitize SQL (catch safety violations)
-        String sanitizedSql;
+        SqlRepairMetadata repairMetadata;
         try {
-            sanitizedSql = safetyPolicy.sanitizeAndEnforceLimit(rawSql);
+            repairMetadata = safetyPolicy.sanitizeAndEnforceLimit(rawSql);
         } catch (SqlSanitizationException e) {
             long ms = (System.nanoTime() - start) / 1_000_000L;
             String detailedMessage = String.format("[%s] %s", 
@@ -40,9 +43,12 @@ public class SqlExecutorService {
             return ExecuteSqlResponse.error(
                 rawSql,
                 ms,
-                SqlExecutionError.fromSafetyViolation(detailedMessage)
+                SqlExecutionError.fromSafetyViolation(detailedMessage),
+                SqlRepairMetadata.noRepair(rawSql),
+                retryCount
             );
-}
+        }
+        String sanitizedSql = repairMetadata.repairedSql();
 
         // Step 2: Execute SQL (catch database errors)
         try {
@@ -92,14 +98,22 @@ public class SqlExecutorService {
                     rows,
                     truncated[0],
                     rows.size(),
-                    ms
+                    ms,
+                    repairMetadata,
+                    retryCount
             );
 
         } catch (DataAccessException e) {
             long ms = (System.nanoTime() - start) / 1_000_000L;
             SQLException sqlEx = extractSqlException(e);
             SqlExecutionError error = mapSqlException(sqlEx);
-            return ExecuteSqlResponse.error(sanitizedSql, ms, error);
+            return ExecuteSqlResponse.error(
+                sanitizedSql,
+                ms,
+                error,
+                repairMetadata,
+                retryCount
+            );
         }
     }
 

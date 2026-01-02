@@ -1,6 +1,7 @@
 package com.project.text2sql.platform.executor;
 
 import com.project.text2sql.platform.config.Text2SqlExecutorProperties;
+import com.project.text2sql.platform.executor.dto.SqlRepairMetadata;
 import net.sf.jsqlparser.expression.LongValue;
 import net.sf.jsqlparser.parser.CCJSqlParserUtil;
 import net.sf.jsqlparser.statement.Statement;
@@ -22,7 +23,17 @@ public class SqlSafetyPolicy {
         this.props = props;
     }
 
-    public String sanitizeAndEnforceLimit(String rawSql) {
+    /**
+     * Sanitizes and validates SQL, returning metadata about any repairs made.
+     * 
+     * @param rawSql User-provided SQL
+     * @return Repair metadata including original and repaired SQL
+     * @throws SqlSanitizationException if SQL violates safety policies
+     */
+    public SqlRepairMetadata sanitizeAndEnforceLimit(String rawSql) {
+        // Store original for comparison
+        String originalSql = rawSql;
+        
         // Validate input
         if (rawSql == null || rawSql.isBlank()) {
             throw new SqlSanitizationException(
@@ -72,10 +83,22 @@ public class SqlSafetyPolicy {
         // Reject locking clauses
         rejectLocking(select);
         
-        // Enforce LIMIT
-        enforceLimit(select);
+        // Enforce LIMIT (this may modify the SQL)
+        boolean limitAdded = enforceLimit(select);
         
-        return select.toString();
+        // Generate repaired SQL
+        String repairedSql = select.toString();
+        
+        // Determine if repair occurred
+        if (limitAdded) {
+            return SqlRepairMetadata.repaired(
+                originalSql,
+                repairedSql,
+                "Added or adjusted LIMIT clause"
+            );
+        } else {
+            return SqlRepairMetadata.noRepair(originalSql);
+        }
     }
 
     private String getStatementTypeName(Statement statement) {
@@ -87,63 +110,56 @@ public class SqlSafetyPolicy {
     }
 
     private void rejectLocking(Select select) {
-    // Check FOR clause (newer JSQLParser versions)
         if (select.getForClause() != null) {
             throw new SqlSanitizationException(
                 "Locking clauses (FOR UPDATE, FOR SHARE, etc.) are not allowed",
                 SqlSanitizationException.ViolationType.LOCKING_CLAUSE_DETECTED
             );
         }
-    
-        // Check PlainSelect's FOR UPDATE (older approach)
-        if (select.getPlainSelect() != null) {
-            PlainSelect ps = select.getPlainSelect();
-            
-            // Check forUpdateTable
-            if (ps.getForUpdateTable() != null) {
-                throw new SqlSanitizationException(
-                    "FOR UPDATE clause is not allowed",
-                    SqlSanitizationException.ViolationType.LOCKING_CLAUSE_DETECTED
-                );
-            }
-            
-            // Check wait (some versions use this)
-            if (ps.getWait() != null) {
-                throw new SqlSanitizationException(
-                    "FOR UPDATE clause is not allowed",
-                    SqlSanitizationException.ViolationType.LOCKING_CLAUSE_DETECTED
-                );
-            }
-            
-            // Alternative: check SQL string contains FOR UPDATE
-            String sqlStr = select.toString().toUpperCase();
-            if (sqlStr.contains("FOR UPDATE") || sqlStr.contains("FOR SHARE")) {
-                throw new SqlSanitizationException(
-                    "Locking clauses (FOR UPDATE, FOR SHARE, etc.) are not allowed",
-                    SqlSanitizationException.ViolationType.LOCKING_CLAUSE_DETECTED
-                );
-            }
+
+        PlainSelect ps = select.getPlainSelect();
+        if (ps != null && ps.getForUpdateTable() != null) {
+            throw new SqlSanitizationException(
+                "FOR UPDATE clause is not allowed",
+                SqlSanitizationException.ViolationType.LOCKING_CLAUSE_DETECTED
+            );
         }
     }
 
-    private void enforceLimit(Select select) {
+    /**
+     * Enforces LIMIT clause on SELECT statement.
+     * 
+     * @return true if LIMIT was added or modified, false otherwise
+     */
+    private boolean enforceLimit(Select select) {
         int defaultLimit = Math.max(1, props.getDefaultLimit());
         int maxLimit = Math.max(defaultLimit, props.getMaxLimit());
 
         Limit limit = select.getLimit();
+        
+        // No LIMIT - add default
         if (limit == null || limit.getRowCount() == null) {
             select.setLimit(buildLimit(defaultLimit));
-            return;
+            return true;  // LIMIT was added
         }
 
+        // Parse existing LIMIT
         long requested = parseLongLimit(limit);
+        
+        // Invalid LIMIT - set to default
         if (requested <= 0) {
             select.setLimit(buildLimit(defaultLimit));
-            return;
+            return true;  // LIMIT was modified
         }
-
-        long clamped = Math.min(requested, maxLimit);
-        select.setLimit(buildLimit(clamped));
+        
+        // Clamp to max
+        if (requested > maxLimit) {
+            select.setLimit(buildLimit(maxLimit));
+            return true;  // LIMIT was clamped
+        }
+        
+        // LIMIT already valid
+        return false;  // No change needed
     }
 
     private static long parseLongLimit(Limit limit) {

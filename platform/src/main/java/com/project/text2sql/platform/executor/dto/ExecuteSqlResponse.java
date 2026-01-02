@@ -9,7 +9,9 @@ public record ExecuteSqlResponse(
         boolean truncated,
         int rowCount,
         long executionTimeMs,
-        SqlExecutionError error  // null if success, populated on error
+        SqlExecutionError error,  // null if success, populated on error
+        SqlRepairMetadata repairMetadata,
+        int retryCount
 ) {
     /**
      * Create a successful response.
@@ -20,7 +22,9 @@ public record ExecuteSqlResponse(
             List<List<String>> rows,
             boolean truncated,
             int rowCount,
-            long executionTimeMs
+            long executionTimeMs,
+            SqlRepairMetadata repairMetadata,
+            int retryCount
     ) {
         return new ExecuteSqlResponse(
                 sanitizedSql,
@@ -29,7 +33,9 @@ public record ExecuteSqlResponse(
                 truncated,
                 rowCount,
                 executionTimeMs,
-                null  // No error
+                null,  // No error
+                repairMetadata,
+                retryCount
         );
     }
 
@@ -39,7 +45,9 @@ public record ExecuteSqlResponse(
     public static ExecuteSqlResponse error(
             String sanitizedSql,
             long executionTimeMs,
-            SqlExecutionError error
+            SqlExecutionError error,
+            SqlRepairMetadata repairMetadata,
+            int retryCount
     ) {
         return new ExecuteSqlResponse(
                 sanitizedSql,
@@ -48,7 +56,9 @@ public record ExecuteSqlResponse(
                 false,
                 0,
                 executionTimeMs,
-                error
+                error,
+                repairMetadata,
+                retryCount
         );
     }
 }

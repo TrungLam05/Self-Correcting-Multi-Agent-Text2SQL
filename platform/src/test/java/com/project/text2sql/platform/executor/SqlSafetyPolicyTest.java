@@ -1,6 +1,7 @@
 package com.project.text2sql.platform.executor;
 
 import com.project.text2sql.platform.config.Text2SqlExecutorProperties;
+import com.project.text2sql.platform.executor.dto.SqlRepairMetadata;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -47,8 +48,11 @@ class SqlSafetyPolicyTest {
     @Test
     void addsLimitIfMissing() {
         SqlSafetyPolicy p = new SqlSafetyPolicy(props());
-        String out = p.sanitizeAndEnforceLimit("SELECT * FROM users");
-        assertTrue(out.toLowerCase().contains("limit"));
+        SqlRepairMetadata metadata = p.sanitizeAndEnforceLimit("SELECT * FROM users");
+        
+        assertTrue(metadata.repairedSql().toLowerCase().contains("limit"));
+        assertTrue(metadata.wasRepaired());
+        assertEquals("Added or adjusted LIMIT clause", metadata.repairReason());
     }
 
     private static Text2SqlExecutorProperties props() {

@@ -3,6 +3,8 @@ package com.project.text2sql.platform.executor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.project.text2sql.platform.executor.dto.ExecuteSqlRequest;
 import com.project.text2sql.platform.executor.dto.ExecuteSqlResponse;
+import com.project.text2sql.platform.executor.dto.SqlRepairMetadata;
+
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -51,7 +53,9 @@ class SqlExecutorControllerIntegrationTest {
                 ),
                 false,
                 2,
-                45
+                45,
+                SqlRepairMetadata.noRepair("SELECT * FROM orders LIMIT 10"),
+                0
         );
         
         when(executorService.execute(any())).thenReturn(mockResponse);
@@ -95,7 +99,9 @@ class SqlExecutorControllerIntegrationTest {
                         "42601",
                         1,
                         null
-                )
+                ),
+                SqlRepairMetadata.noRepair("SELECTT * FROM orders"),
+                0
         );
         
         when(executorService.execute(any())).thenReturn(mockResponse);
@@ -137,7 +143,9 @@ class SqlExecutorControllerIntegrationTest {
                         "42P01",
                         null,
                         null
-                )
+                ),
+                SqlRepairMetadata.noRepair("SELECT * FROM nonexistent_table"),
+                0
         );
         
         when(executorService.execute(any())).thenReturn(mockResponse);
@@ -166,7 +174,9 @@ class SqlExecutorControllerIntegrationTest {
                         null,
                         null,
                         null
-                )
+                ),
+                SqlRepairMetadata.noRepair("DELETE FROM orders"),
+                0
         );
         
         when(executorService.execute(any())).thenReturn(mockResponse);
@@ -195,7 +205,9 @@ class SqlExecutorControllerIntegrationTest {
                         "57014",
                         null,
                         null
-                )
+                ),
+                SqlRepairMetadata.noRepair("SELECT * FROM huge_table"),
+                0
         );
         
         when(executorService.execute(any())).thenReturn(mockResponse);
@@ -227,7 +239,9 @@ class SqlExecutorControllerIntegrationTest {
                         "42703",
                         15,
                         "Check column name spelling"
-                )
+                ),
+                SqlRepairMetadata.noRepair("SELECT bad_column FROM orders"),
+                0
         );
         
         when(executorService.execute(any())).thenReturn(mockResponse);

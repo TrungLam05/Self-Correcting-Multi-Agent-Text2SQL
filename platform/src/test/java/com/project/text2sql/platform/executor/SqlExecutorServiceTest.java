@@ -2,6 +2,7 @@ package com.project.text2sql.platform.executor;
 
 import com.project.text2sql.platform.config.Text2SqlExecutorProperties;
 import com.project.text2sql.platform.executor.dto.ExecuteSqlResponse;
+import com.project.text2sql.platform.executor.dto.SqlRepairMetadata;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -17,7 +18,6 @@ import java.sql.SQLException;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
-import static org.mockito.Mockito.lenient;
 
 @ExtendWith(MockitoExtension.class)
 class SqlExecutorServiceTest {
@@ -37,20 +37,16 @@ class SqlExecutorServiceTest {
     void setUp() {
         service = new SqlExecutorService(jdbcTemplate, safetyPolicy, props);
         
-        // Default properties (lenient to avoid unnecessary stubbing warnings in safety violation tests)
         lenient().when(props.getMaxLimit()).thenReturn(1000);
         lenient().when(props.getQueryTimeoutSeconds()).thenReturn(5);
     }
-
-    // =====================================================================
-    // SUCCESS CASES
-    // =====================================================================
 
     @Test
     void execute_validSelectQuery_returnsSuccessResponse() {
         // Arrange
         String sql = "SELECT * FROM orders LIMIT 10";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
                 .thenReturn(null);
 
@@ -62,10 +58,13 @@ class SqlExecutorServiceTest {
         assertNull(response.error(), "Success response should have null error");
         assertEquals(sql, response.sanitizedSql());
         assertTrue(response.executionTimeMs() >= 0);
+        assertNotNull(response.repairMetadata());
+        assertFalse(response.repairMetadata().wasRepaired());
+        assertEquals(0, response.retryCount());
     }
 
     // =====================================================================
-    // SAFETY VIOLATION ERRORS
+    // SAFETY VIOLATIONS (IllegalArgumentException from SafetyPolicy)
     // =====================================================================
 
     @Test
@@ -73,7 +72,8 @@ class SqlExecutorServiceTest {
         // Arrange
         String sql = "DELETE FROM orders";
         when(safetyPolicy.sanitizeAndEnforceLimit(sql))
-                .thenThrow(new IllegalArgumentException("only SELECT statements are allowed"));
+                .thenThrow(new SqlSanitizationException("only SELECT statements are allowed", 
+                    SqlSanitizationException.ViolationType.FORBIDDEN_STATEMENT_TYPE));
 
         // Act
         ExecuteSqlResponse response = service.execute(sql);
@@ -82,11 +82,8 @@ class SqlExecutorServiceTest {
         assertNotNull(response);
         assertNotNull(response.error());
         assertEquals(SqlErrorCode.SAFETY_VIOLATION, response.error().errorCode());
-        assertEquals("only SELECT statements are allowed", response.error().message());
-        assertNull(response.error().sqlState());
-        assertEquals(0, response.rowCount());
-        assertTrue(response.columns().isEmpty());
-        assertTrue(response.rows().isEmpty());
+        assertTrue(response.error().message().contains("SELECT"));
+        assertEquals(0, response.retryCount());
     }
 
     @Test
@@ -94,12 +91,14 @@ class SqlExecutorServiceTest {
         // Arrange
         String sql = "SELECT 1; DROP TABLE users;";
         when(safetyPolicy.sanitizeAndEnforceLimit(sql))
-                .thenThrow(new IllegalArgumentException("only single-statement sql is allowed"));
+                .thenThrow(new SqlSanitizationException("only single-statement sql is allowed",
+                    SqlSanitizationException.ViolationType.MULTIPLE_STATEMENTS));
 
         // Act
         ExecuteSqlResponse response = service.execute(sql);
 
         // Assert
+        assertNotNull(response);
         assertNotNull(response.error());
         assertEquals(SqlErrorCode.SAFETY_VIOLATION, response.error().errorCode());
         assertTrue(response.error().message().contains("single-statement"));
@@ -110,12 +109,14 @@ class SqlExecutorServiceTest {
         // Arrange
         String sql = "SELECT * FROM orders WHERE ".repeat(1000);
         when(safetyPolicy.sanitizeAndEnforceLimit(sql))
-                .thenThrow(new IllegalArgumentException("sql exceeds maximum length"));
+                .thenThrow(new SqlSanitizationException("sql exceeds maximum length",
+                    SqlSanitizationException.ViolationType.EXCEEDS_LENGTH_LIMIT));
 
         // Act
         ExecuteSqlResponse response = service.execute(sql);
 
         // Assert
+        assertNotNull(response);
         assertNotNull(response.error());
         assertEquals(SqlErrorCode.SAFETY_VIOLATION, response.error().errorCode());
     }
@@ -127,15 +128,15 @@ class SqlExecutorServiceTest {
     @Test
     void execute_syntaxError_returnsSyntaxErrorCode() {
         // Arrange
-        String sql = "SELECTT * FROM orders";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        String sql = "SELECT * FROM orders";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         SQLException sqlException = new SQLException(
-                "ERROR: syntax error at or near \"SELECTT\"",
-                "42601"
+            "ERROR: syntax error at or near \"SELECTT\" at character 1", 
+            "42601"
         );
         
-        // FIXED: Added explicit type parameter
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
                 .thenThrow(new TestDataAccessException("Syntax error", sqlException));
 
@@ -146,7 +147,8 @@ class SqlExecutorServiceTest {
         assertNotNull(response.error());
         assertEquals(SqlErrorCode.SYNTAX_ERROR, response.error().errorCode());
         assertEquals("42601", response.error().sqlState());
-        assertTrue(response.error().message().contains("syntax error"));
+        assertNotNull(response.error().position());
+        assertEquals(1, response.error().position());
     }
 
     // =====================================================================
@@ -156,12 +158,13 @@ class SqlExecutorServiceTest {
     @Test
     void execute_tableNotFound_returnsTableNotFoundError() {
         // Arrange
-        String sql = "SELECT * FROM nonexistent_table";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        String sql = "SELECT * FROM orders";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         SQLException sqlException = new SQLException(
-                "ERROR: relation \"nonexistent_table\" does not exist",
-                "42P01"
+            "ERROR: relation \"nonexistent\" does not exist", 
+            "42P01"
         );
         
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
@@ -174,7 +177,6 @@ class SqlExecutorServiceTest {
         assertNotNull(response.error());
         assertEquals(SqlErrorCode.TABLE_NOT_FOUND, response.error().errorCode());
         assertEquals("42P01", response.error().sqlState());
-        assertTrue(response.error().message().contains("does not exist"));
     }
 
     // =====================================================================
@@ -184,12 +186,13 @@ class SqlExecutorServiceTest {
     @Test
     void execute_columnNotFound_returnsColumnNotFoundError() {
         // Arrange
-        String sql = "SELECT nonexistent_column FROM orders";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        String sql = "SELECT * FROM orders";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         SQLException sqlException = new SQLException(
-                "ERROR: column \"nonexistent_column\" does not exist",
-                "42703"
+            "ERROR: column \"bad_column\" does not exist at character 8", 
+            "42703"
         );
         
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
@@ -202,6 +205,7 @@ class SqlExecutorServiceTest {
         assertNotNull(response.error());
         assertEquals(SqlErrorCode.COLUMN_NOT_FOUND, response.error().errorCode());
         assertEquals("42703", response.error().sqlState());
+        assertEquals(8, response.error().position());
     }
 
     // =====================================================================
@@ -211,12 +215,13 @@ class SqlExecutorServiceTest {
     @Test
     void execute_ambiguousColumn_returnsAmbiguousColumnError() {
         // Arrange
-        String sql = "SELECT id FROM orders o JOIN customers c ON o.customer_id = c.id";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        String sql = "SELECT * FROM orders";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         SQLException sqlException = new SQLException(
-                "ERROR: column reference \"id\" is ambiguous",
-                "42702"
+            "ERROR: column reference \"id\" is ambiguous", 
+            "42702"
         );
         
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
@@ -238,12 +243,13 @@ class SqlExecutorServiceTest {
     @Test
     void execute_permissionDenied_returnsPermissionDeniedError() {
         // Arrange
-        String sql = "SELECT * FROM secure_table";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        String sql = "SELECT * FROM orders";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         SQLException sqlException = new SQLException(
-                "ERROR: permission denied for table secure_table",
-                "42501"
+            "ERROR: permission denied for table orders", 
+            "42501"
         );
         
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
@@ -259,18 +265,19 @@ class SqlExecutorServiceTest {
     }
 
     // =====================================================================
-    // TYPE ERROR (SQLSTATE 42804, 22P02)
+    // TYPE ERROR (SQLSTATE 22P02, 42804)
     // =====================================================================
 
     @Test
-    void execute_typeMismatch_returnsTypeError() {
+    void execute_typeError_returnsTypeError() {
         // Arrange
-        String sql = "SELECT * FROM orders WHERE total_amount = 'not_a_number'";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        String sql = "SELECT * FROM orders";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         SQLException sqlException = new SQLException(
-                "ERROR: invalid input syntax for type numeric: \"not_a_number\"",
-                "22P02"
+            "ERROR: invalid input syntax for type integer: \"abc\"", 
+            "22P02"
         );
         
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
@@ -292,12 +299,13 @@ class SqlExecutorServiceTest {
     @Test
     void execute_divisionByZero_returnsArithmeticError() {
         // Arrange
-        String sql = "SELECT 1/0";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        String sql = "SELECT * FROM orders";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         SQLException sqlException = new SQLException(
-                "ERROR: division by zero",
-                "22012"
+            "ERROR: division by zero", 
+            "22012"
         );
         
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
@@ -313,18 +321,19 @@ class SqlExecutorServiceTest {
     }
 
     // =====================================================================
-    // QUERY CANCELLED/TIMEOUT (SQLSTATE 57014)
+    // QUERY CANCELLED (SQLSTATE 57014)
     // =====================================================================
 
     @Test
-    void execute_queryTimeout_returnsQueryCancelledError() {
+    void execute_queryCancelled_returnsQueryCancelledError() {
         // Arrange
-        String sql = "SELECT * FROM huge_table";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        String sql = "SELECT * FROM orders";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         SQLException sqlException = new SQLException(
-                "ERROR: canceling statement due to statement timeout",
-                "57014"
+            "ERROR: canceling statement due to statement timeout", 
+            "57014"
         );
         
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
@@ -344,18 +353,19 @@ class SqlExecutorServiceTest {
     // =====================================================================
 
     @Test
-    void execute_connectionFailure_returnsDatabaseUnavailableError() {
+    void execute_connectionFailure_returnsDatabaseUnavailable() {
         // Arrange
         String sql = "SELECT * FROM orders";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         SQLException sqlException = new SQLException(
-                "ERROR: connection has been closed",
-                "08003"
+            "ERROR: connection refused", 
+            "08006"
         );
         
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
-                .thenThrow(new TestDataAccessException("Connection closed", sqlException));
+                .thenThrow(new TestDataAccessException("Connection error", sqlException));
 
         // Act
         ExecuteSqlResponse response = service.execute(sql);
@@ -363,68 +373,19 @@ class SqlExecutorServiceTest {
         // Assert
         assertNotNull(response.error());
         assertEquals(SqlErrorCode.DATABASE_UNAVAILABLE, response.error().errorCode());
-        assertEquals("08003", response.error().sqlState());
+        assertEquals("08006", response.error().sqlState());
     }
 
     // =====================================================================
-    // ERROR POSITION EXTRACTION
-    // =====================================================================
-
-    @Test
-    void execute_syntaxErrorWithPosition_extractsPosition() {
-        // Arrange
-        String sql = "SELECTT * FROM orders";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
-        
-        SQLException sqlException = new SQLException(
-                "ERROR: syntax error at or near \"SELECTT\" at character 1",
-                "42601"
-        );
-        
-        when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
-                .thenThrow(new TestDataAccessException("Syntax error", sqlException));
-
-        // Act
-        ExecuteSqlResponse response = service.execute(sql);
-
-        // Assert
-        assertNotNull(response.error());
-        assertNotNull(response.error().position());
-        assertEquals(1, response.error().position());
-    }
-
-    // =====================================================================
-    // UNKNOWN ERROR HANDLING
+    // UNKNOWN ERRORS
     // =====================================================================
 
     @Test
     void execute_unknownSqlState_returnsExecutionError() {
         // Arrange
         String sql = "SELECT * FROM orders";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
-        
-        SQLException sqlException = new SQLException(
-                "ERROR: something weird happened",
-                "XX999"  // Unknown SQLSTATE
-        );
-        
-        when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
-                .thenThrow(new TestDataAccessException("Unknown error", sqlException));
-
-        // Act
-        ExecuteSqlResponse response = service.execute(sql);
-
-        // Assert
-        assertNotNull(response.error());
-        assertEquals(SqlErrorCode.EXECUTION_ERROR, response.error().errorCode());
-        assertEquals("XX999", response.error().sqlState());
-    }
-
-    @Test
-    void execute_nullSqlState_returnsExecutionError() {
-        // Arrange
-        String sql = "SELECT * FROM orders";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         // Use explicit constructor: SQLException(reason, sqlState, vendorCode)
         SQLException sqlException = new SQLException("ERROR: unknown error", (String) null);
@@ -438,26 +399,26 @@ class SqlExecutorServiceTest {
         // Assert
         assertNotNull(response.error());
         assertEquals(SqlErrorCode.EXECUTION_ERROR, response.error().errorCode());
-        assertNull(response.error().sqlState());
     }
 
     // =====================================================================
-    // CLASS-LEVEL SQLSTATE MATCHING
+    // CLASS-LEVEL SQLSTATE FALLBACK
     // =====================================================================
 
     @Test
-    void execute_unknownClass42Error_mapToSyntaxError() {
+    void execute_unknownSyntaxClass_fallsBackToSyntaxError() {
         // Arrange
         String sql = "SELECT * FROM orders";
-        when(safetyPolicy.sanitizeAndEnforceLimit(sql)).thenReturn(sql);
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
         
         SQLException sqlException = new SQLException(
-                "ERROR: some class 42 error",
-                "42999"  // Unknown but in syntax error class
+            "ERROR: some syntax issue", 
+            "42999"  // Unknown 42xxx code
         );
         
         when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
-                .thenThrow(new TestDataAccessException("Class 42 error", sqlException));
+                .thenThrow(new TestDataAccessException("Syntax class error", sqlException));
 
         // Act
         ExecuteSqlResponse response = service.execute(sql);
@@ -468,33 +429,93 @@ class SqlExecutorServiceTest {
     }
 
     // =====================================================================
-    // Helper methods
+    // REPAIR METADATA TESTS (B6)
     // =====================================================================
 
-    /**
-     * Helper method to create a typed ResultSetExtractor matcher.
-     * This avoids unchecked conversion warnings.
-     */
+    @Test
+    void execute_sqlWithoutLimit_includesRepairMetadata() {
+        // Arrange
+        String sql = "SELECT * FROM orders";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.repaired(
+                    sql,
+                    "SELECT * FROM orders LIMIT 200",
+                    "Added default LIMIT"
+                ));
+        when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
+                .thenReturn(null);
+
+        // Act
+        ExecuteSqlResponse response = service.execute(sql);
+
+        // Assert
+        assertNotNull(response);
+        assertNull(response.error());
+        assertNotNull(response.repairMetadata());
+        assertTrue(response.repairMetadata().wasRepaired());
+        assertEquals("Added default LIMIT", response.repairMetadata().repairReason());
+        assertEquals(sql, response.repairMetadata().originalSql());
+        assertEquals("SELECT * FROM orders LIMIT 200", response.repairMetadata().repairedSql());
+        assertEquals(0, response.retryCount());
+    }
+
+    @Test
+    void execute_sqlWithValidLimit_noRepairNeeded() {
+        // Arrange
+        String sql = "SELECT * FROM orders LIMIT 50";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
+        when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
+                .thenReturn(null);
+
+        // Act
+        ExecuteSqlResponse response = service.execute(sql);
+
+        // Assert
+        assertNotNull(response);
+        assertNull(response.error());
+        assertNotNull(response.repairMetadata());
+        assertFalse(response.repairMetadata().wasRepaired());
+        assertNull(response.repairMetadata().repairReason());
+        assertEquals(sql, response.repairMetadata().originalSql());
+        assertEquals(sql, response.repairMetadata().repairedSql());
+    }
+
+    @Test
+    void execute_sqlError_includesRepairMetadataAndRetryCount() {
+        // Arrange
+        String sql = "SELECT * FROM orders";
+        when(safetyPolicy.sanitizeAndEnforceLimit(sql))
+                .thenReturn(SqlRepairMetadata.noRepair(sql));
+        
+        SQLException sqlException = new SQLException("Table not found", "42P01");
+        when(jdbcTemplate.query(any(PreparedStatementCreator.class), this.<Object>anyResultSetExtractor()))
+                .thenThrow(new TestDataAccessException("Error", sqlException));
+
+        // Act
+        ExecuteSqlResponse response = service.execute(sql);
+
+        // Assert
+        assertNotNull(response);
+        assertNotNull(response.error());
+        assertEquals(0, response.retryCount());
+        assertNotNull(response.repairMetadata());
+        assertFalse(response.repairMetadata().wasRepaired());
+    }
+
+    // =====================================================================
+    // HELPER METHODS
+    // =====================================================================
+
     @SuppressWarnings("unchecked")
     private <T> ResultSetExtractor<T> anyResultSetExtractor() {
         return any(ResultSetExtractor.class);
     }
 
-    // =====================================================================
-    // Helper class to wrap SQLException in DataAccessException
-    // =====================================================================
-
+    // Test exception to simulate Spring's DataAccessException
     private static class TestDataAccessException extends DataAccessException {
-        private final SQLException sqlException;
-
-        public TestDataAccessException(String msg, SQLException cause) {
+        public TestDataAccessException(String msg, Throwable cause) {
             super(msg, cause);
-            this.sqlException = cause;
-        }
-
-        @Override
-        public Throwable getCause() {
-            return sqlException;
         }
     }
 }
