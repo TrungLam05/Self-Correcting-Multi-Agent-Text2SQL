@@ -1,6 +1,7 @@
 '''Shared contracts for Text2SQL agents.'''
 from typing import List, Optional, Any, Literal
 from pydantic import BaseModel, Field
+from enum import Enum
 
 class SchemaColumn(BaseModel):
     '''Represents a column in a database schema.'''
@@ -51,3 +52,35 @@ class SQLOutput(BaseModel):
     sql_query: str
     confidence: float
     tables_used: List[str]
+
+class ErrorType(str, Enum):
+    """
+    User Story A4: Defines the types of errors we can recognize.
+    """
+    SYNTAX = "syntax_error"          # Grammar mistakes (e.g., missing comma)
+    SCHEMA = "schema_error"          # Wrong table/column names
+    LOGIC = "logic_error"            # Math errors (e.g., divide by zero)
+    UNKNOWN = "unknown_error"
+
+class RepairInput(BaseModel):
+    """
+    User Story A5: What the Repair Agent needs to do its job.
+    """
+    bad_sql: str
+    error_message: str
+    error_type: ErrorType
+    intent: Optional[QueryIntent] = None
+
+class RepairOutput(BaseModel):
+    """
+    User Story A5: What the Repair Agent returns.
+    """
+    fixed_sql: str
+    reasoning: str
+    confidence: float
+
+class MultiCandidateOutput(BaseModel):
+    """
+    User Story A6: A container for multiple SQL options.
+    """
+    candidates: List[SQLOutput]

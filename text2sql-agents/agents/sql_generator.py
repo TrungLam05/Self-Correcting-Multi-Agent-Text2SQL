@@ -143,3 +143,62 @@ def generate_sql(intent: QueryIntent, schema: DatabaseSchema) -> SQLOutput:
         confidence=confidence,
         tables_used=intent.tables
     )
+
+# --- NEW FUNCTION FOR SPRINT 2 (User Story A6) ---
+from shared.contracts import MultiCandidateOutput
+
+def generate_candidates(intent: QueryIntent, schema: DatabaseSchema, n: int = 3) -> MultiCandidateOutput:
+    """
+    Generate multiple SQL candidates for the same intent.
+    User Story A6: Used when the Router decides the query is complex.
+    """
+    if not intent or not schema:
+        raise ValueError("Intent and Schema are required")
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY not set")
+
+    client = OpenAI(api_key=api_key)
+    formatted_schema = format_schema(schema)
+    intent_json = json.dumps(intent.model_dump(), indent=2)
+
+    try:
+        # Request 'n' completions
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT.format(schema=formatted_schema)},
+                {"role": "user", "content": f"Intent:\n{intent_json}\n\nGenerate {n} distinct SQL queries."}
+            ],
+            n=n,  # <--- Ensures OpenAI generates n variations
+            temperature=0.7 
+        )
+    except Exception as e:
+        raise RuntimeError(f"OpenAI API call failed: {str(e)}")
+
+    candidates = []
+    
+    # ---------------------------------------------------------
+    # KEY FIX: Loop through ALL choices, not just choices[0]
+    # ---------------------------------------------------------
+    for choice in response.choices:
+        raw_sql = choice.message.content
+        cleaned_sql = clean_sql(raw_sql)
+        
+        # Check safety for each specific candidate
+        try:
+            validate_sql_safety(cleaned_sql)
+            is_safe = True
+        except ValueError:
+            is_safe = False
+
+        if is_safe:
+            # Add to list
+            candidates.append(SQLOutput(
+                sql_query=cleaned_sql,
+                confidence=0.8, # Placeholder confidence
+                tables_used=intent.tables
+            ))
+
+    return MultiCandidateOutput(candidates=candidates)
