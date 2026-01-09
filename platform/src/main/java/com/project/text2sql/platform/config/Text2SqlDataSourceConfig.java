@@ -7,11 +7,13 @@ import com.zaxxer.hikari.HikariDataSource;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.annotation.Primary;
 
 @Configuration
 @EnableConfigurationProperties({Text2SqlDbProperties.class, Text2SqlSchemaProperties.class, Text2SqlExecutorProperties.class})
 public class Text2SqlDataSourceConfig {
     @Bean
+    @Primary
     public DataSource text2sqlDataSource(Text2SqlDbProperties properties) {
         HikariConfig config = new HikariConfig();
         config.setJdbcUrl(properties.getJdbcUrl());
