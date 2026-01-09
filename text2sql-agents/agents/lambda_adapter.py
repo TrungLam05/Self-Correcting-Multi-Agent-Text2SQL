@@ -269,6 +269,9 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
         parsed = parse_lambda_input(event)
         
         from agents.sql_generator import generate_sql_with_explanation
+        from agents.sql_generator import generate_candidates, generate_sql
+        from agents.sql_verifier import verify_sql_against_intent
+        from agents.semantic_scorer import pick_best, score_candidates
         
         intent_dict = parsed.get("intent")
         schema_dict = parsed.get("schema")
@@ -294,6 +297,100 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
         sql_output, explanation_output = generate_sql_with_explanation(
             internal_intent, schema, user_query
         )
+        router_decision = parsed.get("router_decision")
+
+        internal_verification_dump: Any = None
+
+        if router_decision == "multi_candidate_strategy":
+            candidate_output = generate_candidates(internal_intent, schema, n=3)
+            if not candidate_output.candidates:
+                raise ValueError("No safe SQL candidates were generated")
+
+            verified_candidates: list[tuple[SQLOutput, Any]] = []
+            all_verifications: list[dict[str, Any]] = []
+
+            for candidate in candidate_output.candidates:
+                v = verify_sql_against_intent(candidate.sql_query, internal_intent)
+                vd = v.model_dump()
+                all_verifications.append({
+                    "sql": candidate.sql_query,
+                    "confidence": candidate.confidence,
+                    "verification": vd,
+                })
+                if v.ok:
+                    verified_candidates.append((candidate, vd))
+
+            internal_verification_dump = {
+                "mode": "multi_candidate",
+                "all": all_verifications,
+                "passing_count": len(verified_candidates),
+                "total_count": len(candidate_output.candidates),
+            }
+
+            if not verified_candidates:
+                return {
+                    "error": True,
+                    "error_type": "sql_verification_error",
+                    "message": "All SQL candidates failed A7 verification",
+                    "_internal_verification": internal_verification_dump,
+                }
+
+            # A8: semantic scoring to pick best among passing candidates
+            passing_sql_outputs = [c for c, _vd in verified_candidates]
+            scored = score_candidates(
+                user_question=parsed.get("user_query") or "",
+                intent=internal_intent,
+                schema=schema,
+                candidates=passing_sql_outputs,
+            )
+            best = pick_best(scored)
+
+            sql_output = best.candidate
+            selected_v = verify_sql_against_intent(sql_output.sql_query, internal_intent)
+            selected_vd = selected_v.model_dump()
+
+            internal_verification_dump["selected"] = {
+                "sql": sql_output.sql_query,
+                "confidence": sql_output.confidence,
+                "verification": selected_vd,
+            }
+            internal_verification_dump["semantic_scoring"] = {
+                "model": "gpt-5-mini",
+                "scores": [
+                    {
+                        "sql": s.candidate.sql_query,
+                        "confidence": s.candidate.confidence,
+                        "score": s.score,
+                        "rationale": s.rationale,
+                    }
+                    for s in scored
+                ],
+                "selected": {
+                    "sql": sql_output.sql_query,
+                    "score": best.score,
+                    "rationale": best.rationale,
+                },
+            }
+            internal_sql_dump: Any = {
+                "selected": sql_output.model_dump(),
+                "candidates": [c.model_dump() for c in candidate_output.candidates],
+            }
+        else:
+            sql_output = generate_sql(internal_intent, schema)
+            v = verify_sql_against_intent(sql_output.sql_query, internal_intent)
+            internal_verification_dump = {
+                "mode": "single_candidate",
+                "verification": v.model_dump(),
+            }
+            if not v.ok:
+                return {
+                    "error": True,
+                    "error_type": "sql_verification_error",
+                    "message": "Generated SQL failed A7 verification",
+                    "_internal_verification": internal_verification_dump,
+                    "generated_sql": convert_sql_output(sql_output),
+                }
+            internal_sql_dump = sql_output.model_dump()
         
         return {
             "user_query": user_query,
@@ -301,8 +398,9 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
             "intent": intent_dict,
             "generated_sql": convert_sql_output(sql_output),
             "explanation": convert_explanation_output(explanation_output),
-            "_internal_sql": sql_output.model_dump(),
-            "_internal_explanation": explanation_output.model_dump()
+            "_internal_explanation": explanation_output.model_dump(),
+            "_internal_sql": internal_sql_dump,
+            "_internal_verification": internal_verification_dump,
         }
     
     except Exception as e:

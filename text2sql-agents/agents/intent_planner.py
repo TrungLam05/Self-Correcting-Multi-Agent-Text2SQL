@@ -1,8 +1,8 @@
 """ Extract structured intent using LLM """
 import json
 import os
-from openai import OpenAI
 from shared.contracts import DatabaseSchema, QueryIntent
+from agents.inference import chat_completion_text
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -48,28 +48,24 @@ def extract_intent(question: str, schema: DatabaseSchema) -> QueryIntent:
         raise ValueError("Question cannot be empty or whitespace")
     if not schema or not schema.tables:
         raise ValueError("Schema cannot be empty or invalid")
-    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-    if not os.getenv("OPENAI_API_KEY"):
-        raise ValueError("OPENAI_API_KEY environment variable is not set")
     formatted_schema = format_schema(schema)
 
     try:
-        response = client.chat.completions.create(
-                model="gpt-5-mini",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": SYSTEM_PROMPT.format(schema=formatted_schema),
-                    },
-                    {"role": "user", "content": f"Question: {question}\n\nExtract intent as JSON."},
-                ],
-                response_format={"type": "json_object"}
-            )
+        raw = chat_completion_text(
+            model="gpt-5-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT.format(schema=formatted_schema),
+                },
+                {"role": "user", "content": f"Question: {question}\n\nExtract intent as JSON."},
+            ],
+            response_format={"type": "json_object"},
+        )[0]
     except Exception as e:
         raise ValueError(f"Error extracting intent: {str(e)}")    
     try:
-        intent_dict = json.loads(response.choices[0].message.content)
+        intent_dict = json.loads(raw)
     except json.JSONDecodeError as e:
         raise ValueError(f"LLM returned invalid JSON: {str(e)}")
     try:

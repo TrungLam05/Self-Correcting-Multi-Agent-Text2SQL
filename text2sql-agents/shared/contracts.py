@@ -104,3 +104,28 @@ class ExplanationOutput(BaseModel):
     key_operations: List[str]  # e.g., ["Aggregation: SUM", "Filter: status='completed'"]
     tables_accessed: List[str]
     confidence: float  # 0.0-1.0
+class SqlVerificationIssue(BaseModel):
+    kind: str
+    message: str 
+
+class SqlFacts(BaseModel):
+    # Outer = the SELECT that produces the final rows
+    outer_aggregations: List[str] = Field(default_factory=list)
+    outer_selected_columns: List[str] = Field(default_factory=list)
+    outer_group_by_columns: List[str] = Field(default_factory=list)
+    outer_where_columns: List[str] = Field(default_factory=list)
+    outer_having_columns: List[str] = Field(default_factory=list)
+    outer_tables: List[str] = Field(default_factory=list)
+
+    # Global = across the entire statement (CTEs/subqueries, etc) for debugging
+    global_aggregations: List[str] = Field(default_factory=list)
+    global_columns: List[str] = Field(default_factory=list)
+    global_tables: List[str] = Field(default_factory=list)
+
+    parse_dialect: str = "postgres"
+    statement_type: Optional[str] = None 
+
+class SqlVerificationResult(BaseModel):
+    ok: bool
+    issues: List[SqlVerificationIssue] = Field(default_factory=list)
+    facts: SqlFacts = Field(default_factory=SqlFacts)
