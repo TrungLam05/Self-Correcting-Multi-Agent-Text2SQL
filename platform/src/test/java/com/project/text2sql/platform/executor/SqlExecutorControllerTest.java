@@ -6,8 +6,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.http.MediaType;
+import org.springframework.test.context.jdbc.Sql;
 import org.springframework.test.web.servlet.MockMvc;
-
+import com.project.text2sql.platform.executor.dto.SqlRepairMetadata;
 import java.util.List;
 
 import static org.mockito.Mockito.when;
@@ -32,7 +33,10 @@ class SqlExecutorControllerTest {
                         List.of(List.of("1")),
                         false,
                         1,
-                        5
+                        5,
+                        null,
+                        SqlRepairMetadata.repaired("select 1", "SELECT 1 LIMIT 1", "Added default LIMIT"),
+                        0
                 ));
 
         mvc.perform(post("/api/executor/execute")

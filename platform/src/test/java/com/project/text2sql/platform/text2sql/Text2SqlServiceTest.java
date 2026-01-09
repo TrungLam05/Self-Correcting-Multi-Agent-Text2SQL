@@ -26,7 +26,8 @@ class Text2SqlServiceTest {
                 List.of(List.of("1")),
                 false,
                 1,
-                10L
+                10L,
+                null
         ));
 
         Text2SqlService svc = new Text2SqlService(exec);
