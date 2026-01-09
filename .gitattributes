@@ -1,10 +1,16 @@
-# Default: keep LF in repo
-* text=auto eol=lf
+# Default: normalize all text files
+* text=auto
 
-# Windows scripts should be CRLF
-*.cmd text eol=crlf
-*.bat text eol=crlf
+# Shell scripts - always LF
+*.sh     text eol=lf
 
-# Shell scripts should be LF
-*.sh text eol=lf
-mvnw text eol=lf
+# Python / SQL / YAML / Markdown
+*.py     text eol=lf
+*.sql    text eol=lf
+*.yaml   text eol=lf
+*.yml    text eol=lf
+*.md     text eol=lf
+
+# Windows command scripts
+*.cmd    text eol=crlf
+*.bat    text eol=crlf
