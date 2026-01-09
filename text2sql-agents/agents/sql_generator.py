@@ -3,8 +3,8 @@
 import json
 import os
 import re
-from openai import OpenAI
 from shared.contracts import DatabaseSchema, QueryIntent, SQLOutput
+from agents.inference import chat_completion_text
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -12,6 +12,8 @@ load_dotenv()
 SYSTEM_PROMPT = """You are a SQL generator for PostgreSQL.
 
 Generate ONLY SELECT statements. Never use INSERT, UPDATE, DELETE, DROP, or any DDL.
+Do NOT use WITH/CTEs. The query MUST start with SELECT.
+Return EXACTLY ONE SQL query. End it with a single semicolon.
 
 Rules:
 1. Use explicit column names (no SELECT *)
@@ -48,7 +50,34 @@ def clean_sql(sql: str) -> str:
     # Remove ```sql ... ``` wrapper
     sql = re.sub(r'^```(?:sql)?\n?', '', sql, flags=re.MULTILINE)
     sql = re.sub(r'\n?```$', '', sql, flags=re.MULTILINE)
-    return sql.strip()
+
+    # If the model emits any preamble, keep only from the first SELECT.
+    # This supports strict validation that the statement starts with SELECT.
+    s = sql.strip()
+    m = re.search(r'\bSELECT\b', s, flags=re.IGNORECASE)
+    if m and m.start() > 0:
+        s = s[m.start():].lstrip()
+
+    # If the model appended commentary after a semicolon, strip it.
+    # IMPORTANT: do NOT strip if a *second SQL statement* clearly starts right after the semicolon;
+    # in that case we want safety validation to reject it.
+    if ";" in s:
+        first, _sep, rest = s.partition(";")
+        if rest.strip():
+            rest_lstrip = rest.lstrip()
+            starts_like_stmt = re.match(
+                r"^(SELECT|WITH|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|TRUNCATE|GRANT|REVOKE)\b",
+                rest_lstrip,
+                flags=re.IGNORECASE,
+            )
+            if not starts_like_stmt:
+                s = first.strip() + ";"
+
+    # Normalize: ensure a single trailing semicolon.
+    if s and not s.rstrip().endswith(";"):
+        s = s.rstrip() + ";"
+
+    return s
 
 
 def validate_sql_safety(sql: str) -> None:
@@ -63,6 +92,14 @@ def validate_sql_safety(sql: str) -> None:
     # Must start with SELECT
     if not sql_upper.startswith('SELECT'):
         raise ValueError("SQL must be a SELECT statement")
+
+    # If the model accidentally returned multiple top-level SELECT blocks without semicolons,
+    # reject it explicitly. (We only check for SELECT at column 0 to avoid false positives
+    # from indented subqueries.)
+    if ";" not in sql_upper:
+        top_level_selects = re.findall(r"(?m)^SELECT\b", sql_upper)
+        if len(top_level_selects) > 1:
+            raise ValueError("Multiple SQL statements not allowed")
     
     # Check for forbidden keywords
     forbidden = [
@@ -102,30 +139,22 @@ def generate_sql(intent: QueryIntent, schema: DatabaseSchema) -> SQLOutput:
     if not schema or not schema.tables:
         raise ValueError("Schema with tables is required")
     
-    # Check for API key
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY environment variable is not set")
-    
-    client = OpenAI(api_key=api_key)
-    
     formatted_schema = format_schema(schema)
     intent_json = json.dumps(intent.model_dump(), indent=2)
     
     try:
-        response = client.chat.completions.create(
+        raw = chat_completion_text(
             model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT.format(schema=formatted_schema)},
-                {"role": "user", "content": f"Intent:\n{intent_json}\n\nGenerate SQL."}
-            ]
-        )
+                {"role": "user", "content": f"Intent:\n{intent_json}\n\nGenerate exactly ONE SQL query. Output must start with SELECT (no WITH/CTE) and end with a single semicolon."}
+            ],
+        )[0]
     except Exception as e:
         raise RuntimeError(f"OpenAI API call failed: {str(e)}")
     
     # Extract and clean SQL
-    sql = response.choices[0].message.content
-    sql = clean_sql(sql)
+    sql = clean_sql(raw)
     
     # Validate safety
     validate_sql_safety(sql)
@@ -137,12 +166,22 @@ def generate_sql(intent: QueryIntent, schema: DatabaseSchema) -> SQLOutput:
     if len(intent.filters) > 2:
         confidence -= 0.1  # Complex filters
     confidence = max(0.5, confidence)
-    
-    return SQLOutput(
+
+    sql_output = SQLOutput(
         sql_query=sql,
         confidence=confidence,
         tables_used=intent.tables
     )
+
+    # Sprint 3 - Role A (A7): Verify SQL matches the structured intent
+    from agents.sql_verifier import verify_sql_against_intent
+
+    verification = verify_sql_against_intent(sql_output.sql_query, intent)
+    if not verification.ok:
+        issues = "; ".join(f"{i.kind}: {i.message}" for i in verification.issues)
+        raise ValueError(f"Generated SQL failed A7 verification: {issues}")
+
+    return sql_output
 
 # --- NEW FUNCTION FOR SPRINT 2 (User Story A6) ---
 from shared.contracts import MultiCandidateOutput
@@ -155,50 +194,67 @@ def generate_candidates(intent: QueryIntent, schema: DatabaseSchema, n: int = 3)
     if not intent or not schema:
         raise ValueError("Intent and Schema are required")
 
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise ValueError("OPENAI_API_KEY not set")
-
-    client = OpenAI(api_key=api_key)
     formatted_schema = format_schema(schema)
     intent_json = json.dumps(intent.model_dump(), indent=2)
 
     try:
-        # Request 'n' completions
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
+        raws = chat_completion_text(
+            model="gpt-5-mini",
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT.format(schema=formatted_schema)},
-                {"role": "user", "content": f"Intent:\n{intent_json}\n\nGenerate {n} distinct SQL queries."}
+                {"role": "user", "content": f"Intent:\n{intent_json}\n\nGenerate {n} DISTINCT SQL queries. Each must be exactly ONE SQL query that starts with SELECT (no WITH/CTE) and ends with a single semicolon."}
             ],
-            n=n,  # <--- Ensures OpenAI generates n variations
-            temperature=0.7 
+            n=n,
         )
     except Exception as e:
         raise RuntimeError(f"OpenAI API call failed: {str(e)}")
 
+    from agents.sql_verifier import verify_sql_against_intent
+
     candidates = []
+    rejected_non_select: list[str] = []
+    rejected_safety: list[str] = []
+    rejected_a7: list[dict[str, object]] = []
     
-    # ---------------------------------------------------------
-    # KEY FIX: Loop through ALL choices, not just choices[0]
-    # ---------------------------------------------------------
-    for choice in response.choices:
-        raw_sql = choice.message.content
+    for raw_sql in raws:
         cleaned_sql = clean_sql(raw_sql)
+
+        if not cleaned_sql.upper().startswith("SELECT"):
+            rejected_non_select.append(cleaned_sql[:200])
+            continue
         
         # Check safety for each specific candidate
         try:
             validate_sql_safety(cleaned_sql)
             is_safe = True
-        except ValueError:
+        except ValueError as e:
             is_safe = False
+            rejected_safety.append(str(e))
 
         if is_safe:
-            # Add to list
-            candidates.append(SQLOutput(
-                sql_query=cleaned_sql,
-                confidence=0.8, # Placeholder confidence
-                tables_used=intent.tables
-            ))
+            verification = verify_sql_against_intent(cleaned_sql, intent)
+            if verification.ok:
+                # Add to list
+                candidates.append(SQLOutput(
+                    sql_query=cleaned_sql,
+                    confidence=0.8, # Placeholder confidence
+                    tables_used=intent.tables
+                ))
+            else:
+                rejected_a7.append({
+                    "sql": cleaned_sql[:400],
+                    "issues": [i.model_dump() for i in verification.issues],
+                })
+
+    if not candidates:
+        raise ValueError(
+            "No safe SQL candidates were generated. "
+            f"Rejected non-SELECT: {len(rejected_non_select)}, "
+            f"rejected by safety: {len(rejected_safety)}, "
+            f"rejected by A7: {len(rejected_a7)}. "
+            f"Sample non-SELECT: {rejected_non_select[:1]}. "
+            f"Sample safety: {rejected_safety[:1]}. "
+            f"Sample A7: {rejected_a7[:1]}."
+        )
 
     return MultiCandidateOutput(candidates=candidates)

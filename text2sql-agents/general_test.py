@@ -7,7 +7,9 @@ import json
 from dotenv import load_dotenv
 from agents.router import classify_complexity
 from agents.intent_planner import extract_intent
-from agents.sql_generator import generate_sql
+from agents.sql_generator import generate_sql, generate_candidates
+from agents.sql_verifier import verify_sql_against_intent
+from agents.semantic_scorer import pick_best, score_candidates
 from shared.contracts import DatabaseSchema, SchemaColumn, SchemaTable
 
 # Load environment variables
@@ -95,15 +97,67 @@ def run_pipeline(question: str, schema: DatabaseSchema):
     print("\n📍 STEP 3: SQL GENERATOR (LLM SQL Generation)")
     print("-" * 80)
     try:
-        sql_output = generate_sql(intent, schema)
-        print("✅ SQL generated successfully!")
-        print(f"\nGenerated SQL:")
+        if router_output.strategy == "multi_candidate":
+            candidate_output = generate_candidates(intent, schema, n=3)
+            if not candidate_output.candidates:
+                raise ValueError("No safe SQL candidates were generated")
+
+            verified = []
+            failed = []
+            for c in candidate_output.candidates:
+                v = verify_sql_against_intent(c.sql_query, intent)
+                (verified if v.ok else failed).append((c, v))
+
+            if not verified:
+                print("❌ All SQL candidates failed A7 verification")
+                for c, v in failed:
+                    print("-" * 40)
+                    print(c.sql_query)
+                    print("Issues:")
+                    for issue in v.issues:
+                        print(f"  - {issue.kind}: {issue.message}")
+                return
+
+            # A8: semantic scoring to pick best among verified candidates
+            verified_candidates = [c for c, _v in verified]
+            scored = score_candidates(
+                user_question=question,
+                intent=intent,
+                schema=schema,
+                candidates=verified_candidates,
+            )
+            best = pick_best(scored)
+
+            sql_output = best.candidate
+            v_selected = verify_sql_against_intent(sql_output.sql_query, intent)
+
+            print("✅ SQL candidates generated successfully!")
+            print(f"\nSelected SQL (best candidate):")
+            print(f"A8 Semantic Score: {best.score:.1f}/10")
+            print(f"A8 Rationale: {best.rationale}")
+        else:
+            sql_output = generate_sql(intent, schema)
+            v_selected = verify_sql_against_intent(sql_output.sql_query, intent)
+            if not v_selected.ok:
+                print("❌ Generated SQL failed A7 verification")
+                for issue in v_selected.issues:
+                    print(f"  - {issue.kind}: {issue.message}")
+                return
+            print("✅ SQL generated successfully!")
+            print(f"\nGenerated SQL:")
+
         print("-" * 40)
         print(sql_output.sql_query)
         print("-" * 40)
         print(f"\nMetadata:")
         print(f"  Confidence: {sql_output.confidence:.2%}")
         print(f"  Tables Used: {', '.join(sql_output.tables_used)}")
+
+        print(f"\nA7 Verification:")
+        print(f"  OK: {v_selected.ok}")
+        if v_selected.issues:
+            for issue in v_selected.issues:
+                print(f"  - {issue.kind}: {issue.message}")
     except Exception as e:
         print(f"❌ SQL generation failed: {e}")
         return
