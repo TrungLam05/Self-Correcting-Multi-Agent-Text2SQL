@@ -3,8 +3,8 @@ import requests
 import json
 
 # 1. PASTE YOUR API GATEWAY URL HERE
-API_URL = "https://uvgbgvrkcg.execute-api.us-east-1.amazonaws.com/dev/query"
-
+# API_URL = "https://uvgbgvrkcg.execute-api.us-east-1.amazonaws.com/dev/query"
+API_URL = "https://hipwbthncg.execute-api.us-east-1.amazonaws.com/dev/query"
 st.title("Text2SQL Sprint 1")
 
 # 2. Input Box
@@ -18,26 +18,28 @@ if st.button("Run Query"):
             payload = {"user_query": query}
             response = requests.post(API_URL, json=payload)
 
-            # Parse AWS response
-            data = response.json()
-
-            # Check if 'output' exists (Step Functions success)
-            if 'output' in data:
-                # The 'output' is a stringified JSON, so we parse it again
-                final_state = json.loads(data['output'])
-
+            print("RAW API RESPONSE:", response.text)  # Debugging line
+            print("STATUS CODE:", response.status_code)  # Debugging line
+            if response.status_code == 200:
+                result = response.json()
                 st.success("Success!")
-
                 st.subheader("Generated SQL")
-                st.code(final_state.get('generated_sql'), language='sql')
+                st.code(result.get("generated_sql", ""), language="sql")
+                st.text(f"Confidence: {result.get('confidence_score', 0)}")
 
                 st.subheader("Data Result")
-                st.write(final_state.get('execution_result'))
+                execution_result = result.get("execution_result", {})
+
+                if isinstance(execution_result, dict) and "rows" in execution_result:
+                    st.json(execution_result["rows"])
+                else:
+                    st.json(execution_result)
 
                 with st.expander("Debug Agent State"):
-                    st.json(final_state)
+                    st.json(result)
             else:
-                st.error(f"Error from AWS: {data}")
+                st.error(f"Error: {response.status_code}")
+                st.code(response.text)
 
         except Exception as e:
             st.error(f"Connection Error: {e}")
