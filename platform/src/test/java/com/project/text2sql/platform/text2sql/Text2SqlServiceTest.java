@@ -27,7 +27,9 @@ class Text2SqlServiceTest {
                 false,
                 1,
                 10L,
-                null
+            null,
+            null,
+            0
         ));
 
         Text2SqlService svc = new Text2SqlService(exec);
