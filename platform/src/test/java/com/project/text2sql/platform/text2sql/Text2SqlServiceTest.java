@@ -27,7 +27,9 @@ class Text2SqlServiceTest {
                 false,
                 1,
                 10L,
-                null
+                null,           // error (SqlExecutionError)
+                null,           // repairMetadata (SqlRepairMetadata)
+                0               // retryCount
         ));
 
         Text2SqlService svc = new Text2SqlService(exec);
