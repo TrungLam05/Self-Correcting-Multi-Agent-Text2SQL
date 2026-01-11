@@ -1,9 +1,11 @@
+# Python
 .venv/
-tests/
-.pytest_cache/
 __pycache__/
-.env
 *.pyc
+.pytest_cache/
+tests/
+.env
+
 # macOS
 .DS_Store
 
@@ -15,3 +17,4 @@ __pycache__/
 
 # Optional 
 target/
+
