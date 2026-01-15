@@ -129,3 +129,22 @@ class SqlVerificationResult(BaseModel):
     ok: bool
     issues: List[SqlVerificationIssue] = Field(default_factory=list)
     facts: SqlFacts = Field(default_factory=SqlFacts)
+class FailureLog(BaseModel):
+    """
+    User Story A10: Records SQL generation failures for analysis.
+    """
+    natural_language_query: str
+    original_sql: str
+    error_type: ErrorType
+    error_message: str
+    timestamp: str  # ISO format datetime string
+    schema_tables: List[str] = Field(default_factory=list)
+
+class ExplanationOutput(BaseModel):
+    """
+    User Story A11: Human-readable explanation of SQL query.
+    """
+    explanation: str
+    key_operations: List[str]  # e.g., ["Aggregation: SUM", "Filter: status='completed'"]
+    tables_accessed: List[str]
+    confidence: float  # 0.0-1.0

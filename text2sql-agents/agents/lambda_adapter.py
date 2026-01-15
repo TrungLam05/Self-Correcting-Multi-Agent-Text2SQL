@@ -272,6 +272,7 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
         from agents.sql_generator import generate_candidates, generate_sql
         from agents.sql_verifier import verify_sql_against_intent
         from agents.semantic_scorer import pick_best, score_candidates
+        from agents.sql_generator import generate_sql_with_explanation
         
         intent_dict = parsed.get("intent")
         schema_dict = parsed.get("schema")
@@ -391,6 +392,13 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
                     "generated_sql": convert_sql_output(sql_output),
                 }
             internal_sql_dump = sql_output.model_dump()
+        # Generate both in one call
+        from agents.sql_generator import explain_generated_sql
+        explanation_output = explain_generated_sql(
+            sql_output.sql_query,
+            user_query,
+            schema
+        )
         
         return {
             "user_query": user_query,
@@ -401,6 +409,8 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
             "_internal_explanation": explanation_output.model_dump(),
             "_internal_sql": internal_sql_dump,
             "_internal_verification": internal_verification_dump,
+            "explanation": convert_explanation_output(explanation_output),
+            "_internal_explanation": explanation_output.model_dump()
         }
     
     except Exception as e:
