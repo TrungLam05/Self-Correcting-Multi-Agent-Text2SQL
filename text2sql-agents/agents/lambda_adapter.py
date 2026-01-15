@@ -19,7 +19,8 @@ from shared.contracts import (
     RouterOutput, 
     QueryIntent, 
     SQLOutput,
-    DatabaseSchema
+    DatabaseSchema,
+    ExplanationOutput
 )
 from agents.router import classify_complexity
 from agents.intent_planner import extract_intent
@@ -95,7 +96,13 @@ def convert_sql_output(sql_output: SQLOutput) -> str:
     """
     return sql_output.sql_query
 
-
+def convert_explanation_output(explanation: ExplanationOutput) -> Dict[str, Any]:
+    return {
+        "explanation": explanation.explanation,
+        "key_operations": explanation.key_operations,
+        "tables_accessed": explanation.tables_accessed,
+        "confidence": explanation.confidence
+    }
 # =============================================================================
 # Lambda Handler Functions
 # =============================================================================
@@ -186,40 +193,91 @@ def intent_planner_handler(event: Dict[str, Any], context: Any = None) -> Dict[s
         }
 
 
-def sql_generator_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
+# def sql_generator_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
+#     """
+#     Lambda handler for SQL Generator Agent.
+    
+#     Input:
+#         {
+#             "user_query": "...",
+#             "router_decision": "...",
+#             "intent": {...},
+#             "schema": {...}
+#         }
+    
+#     Output:
+#         {
+#             "user_query": "...",
+#             "router_decision": "...",
+#             "intent": {...},
+#             "generated_sql": "SELECT..."
+#         }
+#     """
+#     try:
+#         parsed = parse_lambda_input(event)
+        
+#         # You'll implement this when you build sql_generator.py
+#         # For now, placeholder:
+#         from agents.sql_generator import generate_sql
+        
+#         intent_dict = parsed.get("intent")
+#         schema_dict = parsed.get("schema")
+        
+#         if not intent_dict or not schema_dict:
+#             raise ValueError("Intent and schema are required for SQL generation")
+        
+#         # Convert expected intent format back to internal format
+#         internal_intent = QueryIntent(
+#             metric=intent_dict.get("target"),
+#             aggregation=intent_dict.get("metric", "").upper() if intent_dict.get("metric") else None,
+#             filters=intent_dict.get("filters", []),
+#             group_by=intent_dict.get("group_by", []),
+#             order_by=intent_dict.get("order_by"),
+#             limit=intent_dict.get("limit"),
+#             tables=intent_dict.get("tables", [])
+#         )
+        
+#         schema = DatabaseSchema(**schema_dict)
+        
+#         # Run your SQL generator logic
+#         sql_output = generate_sql(internal_intent, schema)
+        
+#         # Return in expected format
+#         return {
+#             "user_query": parsed.get("user_query"),
+#             "router_decision": parsed.get("router_decision"),
+#             "intent": intent_dict,  # Pass through as-is
+#             "generated_sql": convert_sql_output(sql_output),
+#             "_internal_sql": sql_output.model_dump()
+#         }
+    
+#     except Exception as e:
+#         return {
+#             "error": True,
+#             "error_type": "sql_generator_error",
+#             "message": str(e)
+#         }
+
+
+#Generate SQL + Explanation together (efficient, 1 LLM call)
+def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
     """
-    Lambda handler for SQL Generator Agent.
-    
-    Input:
-        {
-            "user_query": "...",
-            "router_decision": "...",
-            "intent": {...},
-            "schema": {...}
-        }
-    
-    Output:
-        {
-            "user_query": "...",
-            "router_decision": "...",
-            "intent": {...},
-            "generated_sql": "SELECT..."
-        }
+    Generate SQL and explanation in one call.
+    Use this for most cases - it's more efficient.
     """
     try:
         parsed = parse_lambda_input(event)
         
-        # You'll implement this when you build sql_generator.py
-        # For now, placeholder:
-        from agents.sql_generator import generate_sql
+        from agents.sql_generator import generate_sql_with_explanation
         
         intent_dict = parsed.get("intent")
         schema_dict = parsed.get("schema")
+        user_query = parsed.get("user_query")
         
-        if not intent_dict or not schema_dict:
-            raise ValueError("Intent and schema are required for SQL generation")
+        if not intent_dict or not schema_dict or not user_query:
+            raise ValueError("Intent, schema, and user_query are required")
         
-        # Convert expected intent format back to internal format
+        # Convert to internal format
         internal_intent = QueryIntent(
             metric=intent_dict.get("target"),
             aggregation=intent_dict.get("metric", "").upper() if intent_dict.get("metric") else None,
@@ -232,21 +290,20 @@ def sql_generator_handler(event: Dict[str, Any], context: Any = None) -> Dict[st
         
         schema = DatabaseSchema(**schema_dict)
         
-        # Run your SQL generator logic
-        sql_output = generate_sql(internal_intent, schema)
+        # Generate both in one call
+        sql_output, explanation_output = generate_sql_with_explanation(
+            internal_intent, schema, user_query
+        )
         
-        # Return in expected format
         return {
-            "user_query": parsed.get("user_query"),
+            "user_query": user_query,
             "router_decision": parsed.get("router_decision"),
-            "intent": intent_dict,  # Pass through as-is
+            "intent": intent_dict,
             "generated_sql": convert_sql_output(sql_output),
-            "_internal_sql": sql_output.model_dump()
+            "explanation": convert_explanation_output(explanation_output),
+            "_internal_sql": sql_output.model_dump(),
+            "_internal_explanation": explanation_output.model_dump()
         }
     
     except Exception as e:
-        return {
-            "error": True,
-            "error_type": "sql_generator_error",
-            "message": str(e)
-        }
+        return {"error": True, "error_type": "sql_generator_error", "message": str(e)}

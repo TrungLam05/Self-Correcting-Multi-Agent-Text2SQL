@@ -4,7 +4,7 @@ import json
 import os
 import re
 from openai import OpenAI
-from shared.contracts import DatabaseSchema, QueryIntent, SQLOutput
+from shared.contracts import DatabaseSchema, ExplanationOutput, QueryIntent, SQLOutput
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -26,6 +26,29 @@ Schema:
 Return ONLY the SQL query. No explanations, no markdown code blocks, just raw SQL.
 """
 
+# NEW: Combined prompt for SQL + Explanation
+SYSTEM_PROMPT_WITH_EXPLANATION = """You are a SQL generator for PostgreSQL.
+
+Generate ONLY SELECT statements. Never use INSERT, UPDATE, DELETE, DROP, or any DDL.
+
+Rules:
+1. Use explicit column names (no SELECT *)
+2. Use table aliases (e.g., o for orders, c for customers)
+3. Add column aliases for aggregations (e.g., SUM(amount) AS total_amount)
+4. Format SQL cleanly with proper indentation
+5. Always validate column names against the provided schema
+
+Schema:
+{schema}
+
+Return a JSON object with:
+{{
+    "sql": "The SQL query",
+    "explanation": "Clear 2-3 sentence explanation of what the query does",
+    "key_operations": ["Operation 1", "Operation 2"],
+    "confidence": 0.9
+}}
+"""
 
 def format_schema(schema: DatabaseSchema) -> str:
     """Format the database schema into a string for the LLM."""
@@ -142,6 +165,164 @@ def generate_sql(intent: QueryIntent, schema: DatabaseSchema) -> SQLOutput:
         sql_query=sql,
         confidence=confidence,
         tables_used=intent.tables
+    )
+
+# NEW: Generate SQL with explanation in one call
+def generate_sql_with_explanation(
+    intent: QueryIntent, 
+    schema: DatabaseSchema,
+    natural_language_query: str
+) -> tuple[SQLOutput, ExplanationOutput]:
+    """
+    Generate SQL and explanation in a single LLM call (more efficient).
+    
+    Args:
+        intent: Structured query intent
+        schema: Database schema
+        natural_language_query: Original user question for context
+    
+    Returns:
+        Tuple of (SQLOutput, ExplanationOutput)
+    """
+    if not intent or not schema or not schema.tables:
+        raise ValueError("Intent and schema are required")
+    
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is not set")
+    
+    client = OpenAI(api_key=api_key)
+    formatted_schema = format_schema(schema)
+    intent_json = json.dumps(intent.model_dump(), indent=2)
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": SYSTEM_PROMPT_WITH_EXPLANATION.format(schema=formatted_schema)
+                },
+                {
+                    "role": "user",
+                    "content": f"Original Question: {natural_language_query}\n\nIntent:\n{intent_json}\n\nGenerate SQL with explanation."
+                }
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3
+        )
+    except Exception as e:
+        raise RuntimeError(f"OpenAI API call failed: {str(e)}")
+    
+    # Parse JSON response
+    try:
+        result = json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Failed to parse LLM response: {str(e)}")
+    
+    sql = result.get("sql", "")
+    sql = clean_sql(sql)
+    validate_sql_safety(sql)
+    
+    # Create SQLOutput
+    sql_output = SQLOutput(
+        sql_query=sql,
+        confidence=result.get("confidence", 0.85),
+        tables_used=intent.tables
+    )
+    
+    # Create ExplanationOutput
+    explanation_output = ExplanationOutput(
+        explanation=result.get("explanation", ""),
+        key_operations=result.get("key_operations", []),
+        tables_accessed=intent.tables,
+        confidence=result.get("confidence", 0.85)
+    )
+    
+    return sql_output, explanation_output
+
+
+# NEW: Add explanation to existing SQL (separate call)
+def explain_generated_sql(
+    sql_query: str,
+    natural_language_query: str,
+    schema: DatabaseSchema
+) -> ExplanationOutput:
+    """
+    Generate explanation for already-generated SQL (uses separate LLM call).
+    Use this when you already have SQL and just need explanation.
+    
+    Args:
+        sql_query: The generated SQL
+        natural_language_query: Original user question
+        schema: Database schema
+    
+    Returns:
+        ExplanationOutput
+    """
+    if not sql_query or not sql_query.strip():
+        raise ValueError("SQL query cannot be empty")
+    
+    if not schema or not schema.tables:
+        raise ValueError("Schema is required")
+    
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY environment variable is not set")
+    
+    client = OpenAI(api_key=api_key)
+    formatted_schema = format_schema(schema)
+    
+    prompt = f"""Explain this SQL query in 2-3 clear sentences.
+
+Original Question: {natural_language_query}
+
+SQL:
+{sql_query}
+
+Schema context:
+{formatted_schema}
+
+Return JSON:
+{{
+    "explanation": "Clear explanation",
+    "key_operations": ["Op1", "Op2"],
+    "confidence": 0.9
+}}
+"""
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a SQL explainer. Convert SQL to business-friendly explanations."
+                },
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.3
+        )
+    except Exception as e:
+        raise RuntimeError(f"OpenAI API call failed: {str(e)}")
+    
+    try:
+        result = json.loads(response.choices[0].message.content)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"Failed to parse explanation: {str(e)}")
+    
+    # Extract tables from SQL
+    tables = []
+    for table in schema.tables:
+        if table.name.lower() in sql_query.lower():
+            tables.append(table.name)
+    
+    return ExplanationOutput(
+        explanation=result.get("explanation", ""),
+        key_operations=result.get("key_operations", []),
+        tables_accessed=tables,
+        confidence=result.get("confidence", 0.85)
     )
 
 # --- NEW FUNCTION FOR SPRINT 2 (User Story A6) ---
