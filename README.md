@@ -1,5 +1,5 @@
 # Self-Correcting Multi-Agent Text2SQL (REST-first, serverless-friendly)
-
+This is my fork of a collaborative project with 2 other members.
 An internal analytics copilot:
 
 - **REST API** endpoints (HTTP/JSON) suitable for AWS API Gateway + Lambda + Step Functions
