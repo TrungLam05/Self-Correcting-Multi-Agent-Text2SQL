@@ -21,3 +21,7 @@ text2sql:
     defaultLimit: 200
     maxLimit: 1000
     queryTimeoutSeconds: 5
+  rate-limit:
+    requestsPerMinute: 30
+  concurrency:
+    maxConcurrentQueries: 4

@@ -14,95 +14,69 @@ Expected format:
 }
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 from shared.contracts import (
-    RouterOutput, 
-    QueryIntent, 
+    RouterOutput,
+    QueryIntent,
     SQLOutput,
     DatabaseSchema,
-    ExplanationOutput
+    ExplanationOutput,
+    ErrorType,
+    RepairInput,
 )
 from agents.router import classify_complexity
 from agents.intent_planner import extract_intent
 
 
 def parse_lambda_input(event: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Parse incoming Lambda event into internal format.
-    
-    Args:
-        event: Raw Lambda event from API Gateway/Step Functions
-    
-    Returns:
-        Parsed input with user_query and optional schema
-    """
+    """Parse incoming Lambda event into internal format."""
     return {
         "user_query": event.get("user_query", ""),
-        "schema": event.get("schema"),  # May be None
-        # Pass through any existing pipeline state
+        "schema": event.get("schema"),
         "router_decision": event.get("router_decision"),
         "intent": event.get("intent"),
         "generated_sql": event.get("generated_sql"),
+        "error_message": event.get("error_message"),
     }
 
 
 def convert_router_output(router_output: RouterOutput) -> str:
-    """
-    Convert internal RouterOutput to expected format.
-    
-    Internal: {"complexity": "simple", "strategy": "single_candidate"}
-    External: "standard_strategy" or "multi_candidate_strategy"
-    """
     if router_output.complexity == "simple":
         return "standard_strategy"
-    else:
-        return "multi_candidate_strategy"
+    return "multi_candidate_strategy"
 
 
 def convert_intent_output(intent: QueryIntent) -> Dict[str, Any]:
-    """
-    Convert internal QueryIntent to Developer C's expected format.
-    
-    Internal: {"metric": "total_amount", "aggregation": "SUM", ...}
-    External: {"target": "total_amount", "metric": "sum", ...}
-    """
     return {
         "target": intent.metric,
         "metric": intent.aggregation.lower() if intent.aggregation else None,
         "filters": [
-            {
-                "column": f.column,
-                "operator": f.operator,
-                "value": f.value
-            }
+            {"column": f.column, "operator": f.operator, "value": f.value}
             for f in intent.filters
         ],
         "group_by": intent.group_by,
         "order_by": {
             "column": intent.order_by.column,
-            "direction": intent.order_by.direction
+            "direction": intent.order_by.direction,
         } if intent.order_by else None,
         "limit": intent.limit,
-        "tables": intent.tables
+        "tables": intent.tables,
     }
 
 
 def convert_sql_output(sql_output: SQLOutput) -> str:
-    """
-    Convert internal SQLOutput to Developer C's expected format.
-    
-    Internal: {"sql_query": "SELECT...", "confidence": 0.9, ...}
-    External: Just the SQL string
-    """
     return sql_output.sql_query
+
 
 def convert_explanation_output(explanation: ExplanationOutput) -> Dict[str, Any]:
     return {
         "explanation": explanation.explanation,
         "key_operations": explanation.key_operations,
         "tables_accessed": explanation.tables_accessed,
-        "confidence": explanation.confidence
+        "confidence": explanation.confidence,
     }
+
+
 # =============================================================================
 # Lambda Handler Functions
 # =============================================================================
@@ -110,178 +84,77 @@ def convert_explanation_output(explanation: ExplanationOutput) -> Dict[str, Any]
 def router_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
     """
     Lambda handler for Router Agent.
-    
-    Input:
-        {"user_query": "Show me total sales", ...}
-    
-    Output:
-        {"user_query": "...", "router_decision": "standard_strategy", ...}
+
+    Input:  {"user_query": "Show me total sales", ...}
+    Output: {"user_query": "...", "router_decision": "standard_strategy", ...}
     """
     try:
         parsed = parse_lambda_input(event)
         user_query = parsed["user_query"]
-        
-        # Run your router logic
+
         router_output = classify_complexity(user_query)
-        
-        # Convert to expected format and pass through pipeline state
+
         return {
             "user_query": user_query,
             "router_decision": convert_router_output(router_output),
-            # Include internal details for logging/debugging
             "_internal": {
                 "complexity": router_output.complexity,
                 "strategy": router_output.strategy,
-                "reasoning": router_output.reasoning
-            }
+                "reasoning": router_output.reasoning,
+            },
         }
-    
     except Exception as e:
-        return {
-            "error": True,
-            "error_type": "router_error",
-            "message": str(e)
-        }
+        return {"error": True, "error_type": "router_error", "message": str(e)}
 
 
 def intent_planner_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
     """
     Lambda handler for Intent Planner Agent.
-    
-    Input:
-        {
-            "user_query": "Show me total sales",
-            "router_decision": "standard_strategy",
-            "schema": {...}  # From Schema Tool
-        }
-    
-    Output:
-        {
-            "user_query": "...",
-            "router_decision": "...",
-            "intent": {"target": "...", "metric": "..."}
-        }
+
+    Input:  {"user_query": "...", "router_decision": "...", "schema": {...}}
+    Output: {"user_query": "...", "router_decision": "...", "intent": {...}}
     """
     try:
         parsed = parse_lambda_input(event)
         user_query = parsed["user_query"]
         schema_dict = parsed.get("schema")
-        
-        # Parse schema if provided
+
         if schema_dict:
             schema = DatabaseSchema(**schema_dict)
         else:
             raise ValueError("Schema is required for intent planning")
-        
-        # Run your intent planner logic
+
         intent = extract_intent(user_query, schema)
-        
-        # Convert to expected format and pass through pipeline state
+
         return {
             "user_query": user_query,
             "router_decision": parsed.get("router_decision"),
             "intent": convert_intent_output(intent),
-            # Include internal details for logging/debugging
-            "_internal_intent": intent.model_dump()
+            "_internal_intent": intent.model_dump(),
         }
-    
     except Exception as e:
-        return {
-            "error": True,
-            "error_type": "intent_planner_error",
-            "message": str(e)
-        }
+        return {"error": True, "error_type": "intent_planner_error", "message": str(e)}
 
 
-# def sql_generator_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
-#     """
-#     Lambda handler for SQL Generator Agent.
-    
-#     Input:
-#         {
-#             "user_query": "...",
-#             "router_decision": "...",
-#             "intent": {...},
-#             "schema": {...}
-#         }
-    
-#     Output:
-#         {
-#             "user_query": "...",
-#             "router_decision": "...",
-#             "intent": {...},
-#             "generated_sql": "SELECT..."
-#         }
-#     """
-#     try:
-#         parsed = parse_lambda_input(event)
-        
-#         # You'll implement this when you build sql_generator.py
-#         # For now, placeholder:
-#         from agents.sql_generator import generate_sql
-        
-#         intent_dict = parsed.get("intent")
-#         schema_dict = parsed.get("schema")
-        
-#         if not intent_dict or not schema_dict:
-#             raise ValueError("Intent and schema are required for SQL generation")
-        
-#         # Convert expected intent format back to internal format
-#         internal_intent = QueryIntent(
-#             metric=intent_dict.get("target"),
-#             aggregation=intent_dict.get("metric", "").upper() if intent_dict.get("metric") else None,
-#             filters=intent_dict.get("filters", []),
-#             group_by=intent_dict.get("group_by", []),
-#             order_by=intent_dict.get("order_by"),
-#             limit=intent_dict.get("limit"),
-#             tables=intent_dict.get("tables", [])
-#         )
-        
-#         schema = DatabaseSchema(**schema_dict)
-        
-#         # Run your SQL generator logic
-#         sql_output = generate_sql(internal_intent, schema)
-        
-#         # Return in expected format
-#         return {
-#             "user_query": parsed.get("user_query"),
-#             "router_decision": parsed.get("router_decision"),
-#             "intent": intent_dict,  # Pass through as-is
-#             "generated_sql": convert_sql_output(sql_output),
-#             "_internal_sql": sql_output.model_dump()
-#         }
-    
-#     except Exception as e:
-#         return {
-#             "error": True,
-#             "error_type": "sql_generator_error",
-#             "message": str(e)
-#         }
-
-
-#Generate SQL + Explanation together (efficient, 1 LLM call)
 def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
     """
-    Generate SQL and explanation in one call.
-    Use this for most cases - it's more efficient.
+    Lambda handler for SQL Generator + Explanation.
+    Handles both single-candidate and multi-candidate strategies.
     """
     try:
         parsed = parse_lambda_input(event)
-        
-        from agents.sql_generator import generate_sql_with_explanation
-        from agents.sql_generator import generate_candidates, generate_sql
+
+        from agents.sql_generator import generate_candidates, generate_sql, explain_generated_sql
         from agents.sql_verifier import verify_sql_against_intent
         from agents.semantic_scorer import pick_best, score_candidates
-        from agents.sql_generator import generate_sql_with_explanation
-        
+
         intent_dict = parsed.get("intent")
         schema_dict = parsed.get("schema")
         user_query = parsed.get("user_query")
-        
+
         if not intent_dict or not schema_dict or not user_query:
             raise ValueError("Intent, schema, and user_query are required")
-        
-        # Convert to internal format
+
         internal_intent = QueryIntent(
             metric=intent_dict.get("target"),
             aggregation=intent_dict.get("metric", "").upper() if intent_dict.get("metric") else None,
@@ -289,17 +162,11 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
             group_by=intent_dict.get("group_by", []),
             order_by=intent_dict.get("order_by"),
             limit=intent_dict.get("limit"),
-            tables=intent_dict.get("tables", [])
+            tables=intent_dict.get("tables", []),
         )
-        
-        schema = DatabaseSchema(**schema_dict)
-        
-        # Generate both in one call
-        sql_output, explanation_output = generate_sql_with_explanation(
-            internal_intent, schema, user_query
-        )
-        router_decision = parsed.get("router_decision")
 
+        schema = DatabaseSchema(**schema_dict)
+        router_decision = parsed.get("router_decision")
         internal_verification_dump: Any = None
 
         if router_decision == "multi_candidate_strategy":
@@ -336,10 +203,9 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
                     "_internal_verification": internal_verification_dump,
                 }
 
-            # A8: semantic scoring to pick best among passing candidates
             passing_sql_outputs = [c for c, _vd in verified_candidates]
             scored = score_candidates(
-                user_question=parsed.get("user_query") or "",
+                user_question=user_query,
                 intent=internal_intent,
                 schema=schema,
                 candidates=passing_sql_outputs,
@@ -348,12 +214,11 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
 
             sql_output = best.candidate
             selected_v = verify_sql_against_intent(sql_output.sql_query, internal_intent)
-            selected_vd = selected_v.model_dump()
 
             internal_verification_dump["selected"] = {
                 "sql": sql_output.sql_query,
                 "confidence": sql_output.confidence,
-                "verification": selected_vd,
+                "verification": selected_v.model_dump(),
             }
             internal_verification_dump["semantic_scoring"] = {
                 "model": "gpt-5-mini",
@@ -392,26 +257,92 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
                     "generated_sql": convert_sql_output(sql_output),
                 }
             internal_sql_dump = sql_output.model_dump()
-        # Generate both in one call
-        from agents.sql_generator import explain_generated_sql
+
         explanation_output = explain_generated_sql(
-            sql_output.sql_query,
-            user_query,
-            schema
+            sql_output.sql_query, user_query, schema
         )
-        
+
         return {
             "user_query": user_query,
-            "router_decision": parsed.get("router_decision"),
+            "router_decision": router_decision,
             "intent": intent_dict,
             "generated_sql": convert_sql_output(sql_output),
             "explanation": convert_explanation_output(explanation_output),
-            "_internal_explanation": explanation_output.model_dump(),
             "_internal_sql": internal_sql_dump,
             "_internal_verification": internal_verification_dump,
-            "explanation": convert_explanation_output(explanation_output),
-            "_internal_explanation": explanation_output.model_dump()
+            "_internal_explanation": explanation_output.model_dump(),
         }
-    
+
     except Exception as e:
         return {"error": True, "error_type": "sql_generator_error", "message": str(e)}
+
+
+def error_classifier_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
+    """
+    Lambda handler for Error Classifier Agent (A4).
+
+    Input:  {"error_message": "column \"foo\" does not exist", ...}
+    Output: {"error_type": "schema_error", ...}
+    """
+    try:
+        from agents.error_classifier import classify_error
+
+        parsed = parse_lambda_input(event)
+        error_message = parsed.get("error_message", "")
+        if not error_message:
+            raise ValueError("error_message is required")
+
+        error_type = classify_error(error_message)
+
+        return {
+            **event,
+            "error_type": error_type.value,
+        }
+    except Exception as e:
+        return {"error": True, "error_type": "classifier_error", "message": str(e)}
+
+
+def repair_agent_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
+    """
+    Lambda handler for Repair Agent (A5).
+
+    Input:  {"generated_sql": "SELECT ...", "error_message": "...", "error_type": "schema_error", "schema": {...}}
+    Output: {"generated_sql": "<fixed SQL>", "repair_metadata": {...}, ...}
+    """
+    try:
+        from agents.repair_agent import repair_sql
+
+        parsed = parse_lambda_input(event)
+        bad_sql = parsed.get("generated_sql", "")
+        error_message = event.get("error_message", "")
+        error_type_str = event.get("error_type", "unknown_error")
+        schema_dict = parsed.get("schema")
+
+        if not bad_sql:
+            raise ValueError("generated_sql is required for repair")
+        if not schema_dict:
+            raise ValueError("schema is required for repair")
+
+        error_type = ErrorType(error_type_str)
+        schema = DatabaseSchema(**schema_dict)
+
+        repair_input = RepairInput(
+            bad_sql=bad_sql,
+            error_message=error_message,
+            error_type=error_type,
+        )
+
+        repair_output = repair_sql(repair_input, schema)
+
+        return {
+            **event,
+            "generated_sql": repair_output.fixed_sql,
+            "repair_metadata": {
+                "original_sql": bad_sql,
+                "fixed_sql": repair_output.fixed_sql,
+                "reasoning": repair_output.reasoning,
+                "confidence": repair_output.confidence,
+            },
+        }
+    except Exception as e:
+        return {"error": True, "error_type": "repair_error", "message": str(e)}
