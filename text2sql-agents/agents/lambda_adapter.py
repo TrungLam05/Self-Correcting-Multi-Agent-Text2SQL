@@ -277,6 +277,61 @@ def sql_generator_handler_with_explanation(event: Dict[str, Any], context: Any =
         return {"error": True, "error_type": "sql_generator_error", "message": str(e)}
 
 
+def executor_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
+    """
+    Lambda handler that proxies SQL execution to the Spring Boot platform.
+    Requires PLATFORM_URL environment variable.
+
+    Input:  {"generated_sql": "SELECT ...", ...}
+    Output: {"execution_result": {"status": "SUCCEEDED"|"FAILED", ...}, ...}
+    """
+    try:
+        import os
+        import httpx
+
+        platform_url = os.environ.get("PLATFORM_URL", "http://localhost:8080")
+        sql = event.get("generated_sql", "")
+        if not sql:
+            raise ValueError("generated_sql is required")
+
+        resp = httpx.post(
+            f"{platform_url}/api/executor/execute",
+            json={"sql": sql},
+            timeout=10.0,
+        )
+        result = resp.json()
+
+        if result.get("error"):
+            return {
+                **event,
+                "execution_result": {
+                    "status": "FAILED",
+                    "error_message": result["error"].get("message", "Unknown error"),
+                    "error_code": result["error"].get("code", "UNKNOWN"),
+                },
+            }
+
+        return {
+            **event,
+            "execution_result": {
+                "status": "SUCCEEDED",
+                "rows": result.get("rows", []),
+                "columns": result.get("columns", []),
+                "rowCount": result.get("rowCount", 0),
+                "executionTimeMs": result.get("executionTimeMs", 0),
+            },
+        }
+    except Exception as e:
+        return {
+            **event,
+            "execution_result": {
+                "status": "FAILED",
+                "error_message": str(e),
+                "error_code": "LAMBDA_ERROR",
+            },
+        }
+
+
 def error_classifier_handler(event: Dict[str, Any], context: Any = None) -> Dict[str, Any]:
     """
     Lambda handler for Error Classifier Agent (A4).
